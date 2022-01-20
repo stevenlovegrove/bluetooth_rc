@@ -4,20 +4,25 @@
 #include <Ps3Controller.h>
 #include <Arduino.h>
 #include <array>
+#include <Adafruit_NeoPixel.h>
 
-constexpr int pwm_resolution_bits = 10;
-constexpr int pwm_freq_hz = 1000;
-constexpr int num_pwm_pins = 6;
-constexpr int motor_hbridge_pwm_pins[] = {12,13,32,33,0,2};
+constexpr int pwm_resolution_bits = 16;
+constexpr int pwm_freq_hz = 50;
+constexpr int num_pwm_pins = 3;
+constexpr int motor_hbridge_pwm_pins[] = {33,32,13}; // 0, 2 not used atm
 char mac[] = "01:02:03:04:05:06";
-const float deadzone_radius = 0.03;
+const float deadzone_radius = 0.1;
 
-// The steering modulation rate when turning.
-// Lower number steers tighter
-constexpr float sf = 0.4f;
-constexpr float bf = 1.0f;
+Adafruit_NeoPixel lights(2, 12);
 
 float stick_offsets[] = {0.0f, 0.0f, 0.0f};
+
+bool light_highbeams = false;
+bool light_blink_left = false;
+bool light_blink_right = false;
+uint8_t light_brightness = 128;
+
+uint32_t anim;
 
 float clamp(float val, float lo, float hi)
 {
@@ -69,45 +74,14 @@ float hbridge_b(float signed_ratio)
     return std::max(0.0f, -signed_ratio);
 }
 
-// \param left_right \in [-1, 1]
-// \param up_down \in [-1, 1]
-std::array<float,6> GetMotorPwm(float left_right, float up_down, float bucket_up_down)
+// \param x \in [-1, 1]
+// \param y \in [-1, 1]
+std::array<float,num_pwm_pins> GetMotorPwm(float x, float y)
 {
-    // Left / Right motor duty period fraction (+ive forward, -ive backward)
-    // for the extremes of motion of the analog stick
-    //  sf,  1      1, 1     1, sf
-    //  -1,  1      0, 0     1, -1
-    // -sf, -1     -1,-1    -1, -sf
-    // 
-    // We pad the table right and bottom (to make 4x4 instead of 3x3) to simplifiy rounding lerp logic below
-    // to stay in bounds.
-    float table_motor_left[4][4] = {
-        {sf, 1.0f, 1.0f, 0.0f},
-        {-1.0f, 0.0f, 1.0f, 0.0f},
-        {-sf, -1.0f, -1.0f, 0.0f},
-        {0.0f, 0.0f, 0.0f, 0.0f},
-    };
-    float table_motor_right[4][4] = {
-        {1.0, 1.0f, sf, 0.0f},
-        {1.0f, 0.0f, -1.0f, 0.0f},
-        {1.0, -1.0f, -sf, 0.0f},
-        {0.0f, 0.0f, 0.0f, 0.0f},
-    };
-
-    // Move x, y from range [-1, 1] to [0, 2] for table
-    const float x = 1.0f + left_right; // [0, 2]
-    const float y = 1.0f + up_down;    // [0, 2]
-    const float left_motor = table_lerp(table_motor_left, x, y);
-    const float right_motor = table_lerp(table_motor_right, x, y);
-    const float bucket_motor = bf * bucket_up_down;
-
     return {
-        // left motor A & B duty fractions for H-Bridge
-        hbridge_a(left_motor), hbridge_b(left_motor),
-        // right motor A & B duty fractions for H-Bridge
-        hbridge_a(right_motor), hbridge_b(right_motor),
-        // Bucket motor A & B duty fractions for H-Bridge
-        hbridge_a(bucket_motor), hbridge_b(bucket_motor)
+        // motor A & B duty fractions for H-Bridge
+        hbridge_a(y), hbridge_b(y),
+        0.075f + x * 0.025f
     };
 }
 
@@ -126,16 +100,37 @@ void stop_pwm()
 }
 
 // x,y,bucket in range [-1,1]
-void update_pwm(float x, float y, float bucket)
+void update_pwm(float x, float y)
 {
     // Take controller input from range [-128,128] into [-1, 1]
     // Map to H-Bridge input PWM duty cycle fraction [0, 1]
-    const auto pwms = GetMotorPwm(x, y, bucket);
+    const auto pwms = GetMotorPwm(x, y);
     
     // Map to PWM HW duty integer and update.
     for(int i=0; i < num_pwm_pins; ++i) {
         ledcWrite(i, fraction_to_duty_int(pwms[i]) );
     }
+}
+
+void setup_lights()
+{
+    lights.begin();
+    lights.fill(0xffffffff);
+    lights.show();
+}
+
+void update_lights()
+{
+    lights.setBrightness(light_brightness);
+
+    const uint32_t color_base = light_highbeams ? 0xffffffff : 0x00000000;
+    const uint32_t color_turn = 0x00BFFF00;
+    const uint32_t color_left = (light_blink_left && (anim%2) ) ? color_turn : color_base;
+    const uint32_t color_right = (light_blink_right && (anim%2) ) ? color_turn : color_base;
+
+    lights.setPixelColor(0, lights.gamma32(color_left) );
+    lights.setPixelColor(1, lights.gamma32(color_right) );
+    lights.show();
 }
 
 float make_deadzone(float val, float dead_radius)
@@ -156,27 +151,40 @@ void notify()
     // x ranges from 0 to 127+128 = 255
     float x = 2.0f * ((int)Ps3.data.analog.stick.rx + 128) / 255.0f - 1.0f;
     float y = 2.0f * ((int)Ps3.data.analog.stick.ry + 128) / 255.0f - 1.0f;
-    float bucket = 2.0 - 2.0f * ((int)Ps3.data.analog.stick.ly + 128) / 255.0f - 1.0f;
 
     if( Ps3.event.button_down.select ) {
         // Calibration
         stick_offsets[0] = x;
         stick_offsets[1] = y;
-        stick_offsets[2] = bucket;
     }
     
-    if(Ps3.data.button.triangle) {
-        bucket = 1.0f;
-    }else if(Ps3.data.button.cross) {
-        bucket = -0.6f;
-    }else{
-        bucket += stick_offsets[2];
+    if(Ps3.event.button_down.triangle) {
+        light_highbeams = true;
+        light_blink_left = false;
+        light_blink_right = false;
+    }else if(Ps3.event.button_down.cross) {
+        light_highbeams = false;
+        light_blink_left = false;
+        light_blink_right = false;
+    }else if(Ps3.event.button_down.square) {
+        anim = 1;
+        light_blink_right = false;
+        light_blink_left = !light_blink_left;
+    }else if(Ps3.event.button_down.circle) {
+        anim = 1;
+        light_blink_left = false;
+        light_blink_right = !light_blink_right;
+    }else if(Ps3.event.button_down.start) {
+        anim = 1;
+        light_blink_left = !light_blink_left;
+        light_blink_right = !light_blink_right;
     }
 
     x -= stick_offsets[0];
     y -= stick_offsets[1];
 
-    update_pwm( map_stick(x), map_stick(y), map_stick(bucket) );
+    update_pwm( map_stick(x), map_stick(y) );
+    update_lights();
 
     // TODO: Go into some charging notification loop for controller
     //     if( Ps3.data.status.battery == ps3_status_battery_low)       Serial.println("LOW");
@@ -216,6 +224,7 @@ void setup_pwm()
 
 void setup()
 {
+    setup_lights();
     setup_pwm();
     setup_bluetooth();
 }
@@ -226,5 +235,8 @@ void loop()
         stop_pwm();
     }
 
-    delay(1000);
+    update_lights();
+
+    delay(500);
+    ++anim;
 }
