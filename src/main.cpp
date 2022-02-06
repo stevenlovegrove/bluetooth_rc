@@ -13,16 +13,45 @@ constexpr int motor_hbridge_pwm_pins[] = {33,32,13}; // 0, 2 not used atm
 char mac[] = "01:02:03:04:05:06";
 const float deadzone_radius = 0.1;
 
-Adafruit_NeoPixel lights(2, 12);
+Adafruit_NeoPixel lights(10, 12);
 
 float stick_offsets[] = {0.0f, 0.0f, 0.0f};
 
 bool light_highbeams = false;
 bool light_blink_left = false;
 bool light_blink_right = false;
+bool light_floods = false;
+bool light_police = false;
 uint8_t light_brightness = 128;
 
 uint32_t anim;
+
+// adapted from https://starthardware.org/us-police-lights-mit-arduino-und-ws2812-led-strip/
+int police_anim_frame = 0;
+int police_anim_repeat = 0;
+const int police_anim_frame_max = 19;
+const int police_anim_durations[police_anim_frame_max] = {100,10,10,5,5,1,5,5,5,4,5,4,10,10,10,2,4,2,10};
+const int police_anim[police_anim_frame_max][8][3] = {
+  {{0, 0, 255 }, {0, 0, 255 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 255 }, {0, 0, 255 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 255 }, {0, 0, 255 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 255, 255}, {255, 255, 255}, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 255, 255}, {255, 255, 255}, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 }, {255, 0, 0 }, {255, 0, 0}, {0, 0, 0 }, {255, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }},
+  {{0, 0, 255 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {255, 0, 0 }},
+  {{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255}},
+  {{0, 0, 255 }, {0, 0, 255 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }},
+  {{0, 0, 0 },{0, 0, 0 },{255, 255, 255},{255, 255, 255},{255, 255, 255},{255, 255, 255},{0, 0, 0 },{0, 0, 0 }},
+  {{0, 0,  0}, {0, 0, 0 }, {255, 0, 0}, {255, 0, 0 }, {255, 0, 0 }, {255, 0, 0 }, {0, 0, 0 }, {0, 0, 0 }}
+};
 
 float clamp(float val, float lo, float hi)
 {
@@ -81,7 +110,7 @@ std::array<float,num_pwm_pins> GetMotorPwm(float x, float y)
     return {
         // motor A & B duty fractions for H-Bridge
         hbridge_a(y), hbridge_b(y),
-        0.075f + x * 0.025f
+        0.075f - x * 0.03f
     };
 }
 
@@ -112,13 +141,6 @@ void update_pwm(float x, float y)
     }
 }
 
-void setup_lights()
-{
-    lights.begin();
-    lights.fill(0xffffffff);
-    lights.show();
-}
-
 void update_lights()
 {
     lights.setBrightness(light_brightness);
@@ -127,10 +149,37 @@ void update_lights()
     const uint32_t color_turn = 0x00BFFF00;
     const uint32_t color_left = (light_blink_left && (anim%2) ) ? color_turn : color_base;
     const uint32_t color_right = (light_blink_right && (anim%2) ) ? color_turn : color_base;
+    const uint32_t color_flood = light_floods ? 0x00FFFFFF : 0x00000000;
 
-    lights.setPixelColor(0, lights.gamma32(color_left) );
-    lights.setPixelColor(1, lights.gamma32(color_right) );
+    if(light_police) {
+        const auto& p_frame = police_anim[police_anim_frame];
+        for(int i=0; i < 8; ++i) {
+            const auto& p_led = p_frame[i];
+            lights.setPixelColor(i, lights.Color(p_led[0], p_led[1], p_led[2]));
+        }
+        police_anim_repeat++;
+        if(police_anim_repeat >= police_anim_durations[police_anim_frame]) {
+            police_anim_repeat = 0;
+            police_anim_frame++;
+            if(police_anim_frame >= police_anim_frame_max) {
+                police_anim_frame = 0;
+            }
+        }
+    }else{
+        for(int i=0; i < 8; ++i) {
+            lights.setPixelColor(i, lights.gamma32(color_flood) );
+        }
+    }
+
+    lights.setPixelColor(8+0, lights.gamma32(color_left) );
+    lights.setPixelColor(8+1, lights.gamma32(color_right) );
     lights.show();
+}
+
+void setup_lights()
+{
+    lights.begin();
+    update_lights();
 }
 
 float make_deadzone(float val, float dead_radius)
@@ -150,6 +199,8 @@ void notify()
     // Stick ranges from -128 to +127
     // x ranges from 0 to 127+128 = 255
     float x = 2.0f * ((int)Ps3.data.analog.stick.rx + 128) / 255.0f - 1.0f;
+    // float x2 = 2.0f * ((int)Ps3.data.analog.stick.lx + 128) / 255.0f - 1.0f;
+    // float x = abs(x1) > abs(x2) ? x1 : x2;
     float y = 2.0f * ((int)Ps3.data.analog.stick.ry + 128) / 255.0f - 1.0f;
 
     if( Ps3.event.button_down.select ) {
@@ -178,6 +229,12 @@ void notify()
         anim = 1;
         light_blink_left = !light_blink_left;
         light_blink_right = !light_blink_right;
+    }else if(Ps3.event.button_down.up) {
+        light_police = false;
+        light_floods = !light_floods;
+    }else if(Ps3.event.button_down.down) {
+        light_floods = false;
+        light_police = !light_police;
     }
 
     x -= stick_offsets[0];
